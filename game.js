@@ -77,6 +77,16 @@ const enemies = [
 	{ x: 11.5, y: 4.5, radius: 0.14, speed: 1.3, health: 3, color: '#c44', scale: 0.55 }
 ];
 
+// Casino tables
+const casinoTables = [
+	{ x: 6.5, y: 6.5, type: 'blackjack', name: 'Blackjack Table', color: '#8B4513', radius: 0.3 },
+	{ x: 9.5, y: 9.5, type: 'poker', name: 'Poker Table', color: '#654321', radius: 0.3 },
+	{ x: 12.5, y: 6.5, type: 'roulette', name: 'Roulette Wheel', color: '#FFD700', radius: 0.3 },
+	{ x: 6.5, y: 12.5, type: 'slots', name: 'Slot Machine', color: '#FF69B4', radius: 0.2 },
+	{ x: 9.5, y: 12.5, type: 'craps', name: 'Craps Table', color: '#32CD32', radius: 0.3 },
+	{ x: 2.5, y: 2.5, type: 'wavecontrol', name: 'Wave Control', color: '#FF0000', radius: 0.3 }
+];
+
 // Shooting state and player stats
 const weapon = { cooldown: 0, rate: 0.8, flash: 0, recoil: 0, ammo: 8, maxAmmo: 8 };
 let playerHP = 5;
@@ -85,6 +95,24 @@ let playerChips = 10;
 let playerScore = 0;
 let damageFlash = 0; // red screen tint timer
 let paused = false; // pause when menus are open
+let roundCompleteMessage = 0; // timer for round complete message
+
+// Casino/Wave system
+let currentWave = 1;
+let enemiesKilled = 0;
+let enemiesToKill = 5; // enemies needed to complete wave
+let waveInProgress = true;
+let waveStartTime = 0;
+let nextWaveDelay = 3; // seconds between waves
+
+// Player upgrades
+const upgrades = {
+    damage: 1,      // damage multiplier
+    fireRate: 1,    // fire rate multiplier  
+    maxHP: 5,       // max health
+    ammoCapacity: 8, // max ammo
+    speed: 1        // movement speed multiplier
+};
 
 const keys = new Set();
 window.addEventListener('keydown', (e) => {
@@ -157,8 +185,8 @@ const keyMaps = {
     p1: {
         forward: () => keys.has('w') || keys.has('W'),
         backward: () => keys.has('s') || keys.has('S'),
-        strafeLeft: () => keys.has('a') || keys.has('A') || keys.has('q') || keys.has('Q'),
-        strafeRight: () => keys.has('d') || keys.has('D') || keys.has('e') || keys.has('E'),
+        strafeLeft: () => keys.has('a') || keys.has('A'),
+        strafeRight: () => keys.has('d') || keys.has('D'),
         turnLeft: () => false, // mouse handles look
         turnRight: () => false,
         sprint: () => false
@@ -202,7 +230,12 @@ function update(dt) {
 			damageFlash = Math.max(damageFlash, 0.35);
 		}
 		// remove dead and drop chips + score
-		if (e.health <= 0) { enemies.splice(i, 1); playerChips += 2; playerScore += 100; }
+		if (e.health <= 0) { 
+			enemies.splice(i, 1); 
+			playerChips += 2; 
+			playerScore += 100; 
+			enemiesKilled++;
+		}
 	}
 
     // Weapon cooldown/flash and damage flash
@@ -211,6 +244,10 @@ function update(dt) {
         if (weapon.flash > 0) weapon.flash -= dt;
         if (weapon.recoil > 0) weapon.recoil -= dt * 3;
         if (damageFlash > 0) damageFlash = Math.max(0, damageFlash - dt * 1.8);
+        if (roundCompleteMessage > 0) roundCompleteMessage -= dt;
+        
+        // Check wave completion
+        checkWaveComplete();
     }
 }
 
@@ -330,9 +367,98 @@ function renderEnemies(px, py, angle, fov, pitch, xOffset, width, height) {
 	}
 }
 
+function renderCasinoTables(px, py, angle, fov, pitch, xOffset, width, height) {
+	for (const table of casinoTables) {
+		const dx = table.x - px;
+		const dy = table.y - py;
+		const dist = Math.hypot(dx, dy);
+		if (dist < 0.0001) continue;
+		const angleTo = Math.atan2(dy, dx);
+		let rel = angleTo - angle;
+		// normalize to [-PI, PI]
+		while (rel > Math.PI) rel -= Math.PI * 2;
+		while (rel < -Math.PI) rel += Math.PI * 2;
+		// culled if behind FOV with margin
+		if (Math.abs(rel) > fov / 2 + 0.2) continue;
+
+		const corrected = dist * Math.cos(rel);
+        const scale = 0.8; // Casino tables are larger than enemies
+        const spriteH = Math.min(height, Math.floor((height / corrected) * scale));
+        const spriteW = spriteH; // billboard square
+		const centerX = Math.floor(xOffset + (rel / fov + 0.5) * width);
+		const top = Math.floor((height - spriteH) / 2 - pitch * 120);
+		const left = Math.floor(centerX - spriteW / 2);
+		const right = Math.floor(centerX + spriteW / 2);
+
+		// color shading by distance
+		const shade = Math.max(0, Math.min(1, 1 - corrected / 10));
+		const baseColor = table.color;
+		const r = parseInt(baseColor.substr(1, 2), 16) * shade;
+		const g = parseInt(baseColor.substr(3, 2), 16) * shade;
+		const b = parseInt(baseColor.substr(5, 2), 16) * shade;
+		ctx.fillStyle = `rgb(${r|0}, ${g|0}, ${b|0})`;
+
+		for (let sx = left; sx <= right; sx++) {
+			if (sx < xOffset || sx >= xOffset + width) continue;
+			const bufX = sx; // xOffset already applied
+			if (bufX < 0 || bufX >= depthBuffer.length) continue;
+			if (corrected >= depthBuffer[bufX]) continue; // occluded by wall
+			ctx.fillRect(sx, top, 1, spriteH);
+		}
+	}
+}
+
+function drawRoundCompleteMessage() {
+    if (roundCompleteMessage > 0) {
+        const cx = Math.floor(INTERNAL_WIDTH / 2);
+        const cy = Math.floor(INTERNAL_HEIGHT / 2);
+        
+        // Draw background
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(cx - 80, cy - 30, 160, 60);
+        
+        // Draw border
+        ctx.strokeStyle = 'rgba(255, 255, 0, 0.8)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(cx - 80, cy - 30, 160, 60);
+        
+        // Draw text
+        ctx.fillStyle = 'rgba(255, 255, 0, 1)';
+        ctx.font = 'bold 16px JetBrains Mono';
+        ctx.textAlign = 'center';
+        ctx.fillText('ROUND COMPLETE!', cx, cy - 5);
+        
+        ctx.font = '12px JetBrains Mono';
+        ctx.fillText(`Wave ${currentWave} cleared`, cx, cy + 15);
+        ctx.fillText(`+${currentWave * 2} chips`, cx, cy + 30);
+    }
+}
+
 function drawCrosshair() {
     const cx = Math.floor(INTERNAL_WIDTH / 2);
     const cy = Math.floor(INTERNAL_HEIGHT / 2);
+    
+    // Check if near a table
+    const nearbyTable = getNearbyTable();
+    if (nearbyTable) {
+        // Draw interaction prompt
+        ctx.fillStyle = nearbyTable.type === 'wavecontrol' ? 'rgba(255, 0, 0, 0.8)' : 'rgba(255, 255, 0, 0.8)';
+        ctx.font = '12px JetBrains Mono';
+        ctx.textAlign = 'center';
+        
+        if (nearbyTable.type === 'wavecontrol') {
+            if (!waveInProgress && enemies.length === 0) {
+                ctx.fillText(`Press E to start Wave ${currentWave + 1}`, cx, cy - 20);
+            } else if (waveInProgress) {
+                ctx.fillText(`Wave ${currentWave} in progress`, cx, cy - 20);
+            } else {
+                ctx.fillText(`Wave Control - Clear enemies first`, cx, cy - 20);
+            }
+        } else {
+            ctx.fillText(`Press E to play ${nearbyTable.name}`, cx, cy - 20);
+        }
+    }
+    
     ctx.strokeStyle = 'rgba(255,255,255,0.85)';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -415,7 +541,10 @@ function render() {
         renderViewport(player1.x, player1.y, player1.angle, player1.fov, player1.pitch, 0, INTERNAL_WIDTH, INTERNAL_HEIGHT);
     }
     // render sprites/enemies after walls
-    if (!SPLIT) renderEnemies(player1.x, player1.y, player1.angle, player1.fov, player1.pitch, 0, INTERNAL_WIDTH, INTERNAL_HEIGHT);
+    if (!SPLIT) {
+        renderCasinoTables(player1.x, player1.y, player1.angle, player1.fov, player1.pitch, 0, INTERNAL_WIDTH, INTERNAL_HEIGHT);
+        renderEnemies(player1.x, player1.y, player1.angle, player1.fov, player1.pitch, 0, INTERNAL_WIDTH, INTERNAL_HEIGHT);
+    }
     // muzzle flash overlay
     if (weapon.flash > 0) {
     	ctx.fillStyle = `rgba(255,255,200,${Math.min(0.4, weapon.flash * 2)})`;
@@ -429,6 +558,7 @@ function render() {
     if (!SPLIT) {
         drawCrosshair();
         drawGun();
+        drawRoundCompleteMessage();
     }
 }
 
@@ -441,7 +571,7 @@ function loop(t) {
 	render();
     fps = Math.round(1 / dt);
     const stats = document.getElementById('stats');
-    if (stats) stats.textContent = `HP:${Math.ceil(playerHP)} Ammo:${weapon.ammo}/${weapon.maxAmmo} Chips:${playerChips} Score:${playerScore} | x:${player1.x.toFixed(2)} y:${player1.y.toFixed(2)} a:${(player1.angle%(Math.PI*2)).toFixed(2)} enemies:${enemies.length} fps:${fps}`;
+    if (stats) stats.textContent = `Wave:${currentWave} HP:${Math.ceil(playerHP)} Ammo:${weapon.ammo}/${weapon.maxAmmo} Chips:${playerChips} | Enemies:${enemies.length}/${enemiesToKill} Killed:${enemiesKilled} Score:${playerScore}`;
     const scoreEl = document.getElementById('score');
     if (scoreEl) scoreEl.textContent = `SCORE ${String(playerScore).padStart(6,'0')}`;
     const hpFill = document.getElementById('health-fill');
@@ -454,6 +584,9 @@ requestAnimationFrame(loop);
 
 // Load gun sprite when game starts
 loadGunSprite();
+
+// Start first wave
+spawnEnemies();
 
 // Pointer Lock for mouse look (Player 1)
 canvas.addEventListener('click', () => {
@@ -486,7 +619,7 @@ canvas.addEventListener('mousedown', (e) => {
 
 function tryShoot() {
 	if (weapon.cooldown > 0 || weapon.ammo <= 0) return;
-	weapon.cooldown = weapon.rate;
+	weapon.cooldown = weapon.rate / upgrades.fireRate; // Apply fire rate upgrade
 	weapon.flash = 0.08;
 	weapon.recoil = 1.0; // Add recoil animation
 	weapon.ammo--; // Consume ammo
@@ -512,7 +645,7 @@ function tryShoot() {
 		}
 	}
 	if (bestIdx !== -1) {
-		enemies[bestIdx].health -= 1;
+		enemies[bestIdx].health -= upgrades.damage; // Apply damage upgrade
 	}
 }
 
@@ -520,6 +653,136 @@ function reload() {
 	if (weapon.ammo < weapon.maxAmmo && playerChips >= 1) {
 		weapon.ammo = weapon.maxAmmo;
 		playerChips -= 1; // Cost 1 chip to reload
+	}
+}
+
+function getNearbyTable() {
+	for (const table of casinoTables) {
+		const dist = Math.hypot(table.x - player1.x, table.y - player1.y);
+		if (dist < table.radius + 0.5) { // Within interaction range
+			return table;
+		}
+	}
+	return null;
+}
+
+function interactWithTable() {
+	const table = getNearbyTable();
+	if (!table) return;
+	
+	switch (table.type) {
+		case 'blackjack':
+			bjOpen();
+			break;
+		case 'poker':
+			playPoker();
+			break;
+		case 'roulette':
+			playRoulette();
+			break;
+		case 'slots':
+			playSlots();
+			break;
+		case 'craps':
+			playCraps();
+			break;
+		case 'wavecontrol':
+			startNextWave();
+			break;
+	}
+}
+
+function playPoker() {
+	if (playerChips < 2) return;
+	playerChips -= 2;
+	const win = Math.random() < 0.4; // 40% win rate
+	if (win) {
+		playerChips += 5;
+		console.log('Poker: You won! +5 chips');
+	} else {
+		console.log('Poker: You lost! -2 chips');
+	}
+}
+
+function playRoulette() {
+	if (playerChips < 1) return;
+	playerChips -= 1;
+	const win = Math.random() < 0.35; // 35% win rate
+	if (win) {
+		playerChips += 3;
+		console.log('Roulette: You won! +3 chips');
+	} else {
+		console.log('Roulette: You lost! -1 chip');
+	}
+}
+
+function playSlots() {
+	if (playerChips < 1) return;
+	playerChips -= 1;
+	const win = Math.random() < 0.25; // 25% win rate
+	if (win) {
+		playerChips += 4;
+		console.log('Slots: JACKPOT! +4 chips');
+	} else {
+		console.log('Slots: Try again! -1 chip');
+	}
+}
+
+function playCraps() {
+	if (playerChips < 3) return;
+	playerChips -= 3;
+	const win = Math.random() < 0.45; // 45% win rate
+	if (win) {
+		playerChips += 6;
+		console.log('Craps: Snake eyes! +6 chips');
+	} else {
+		console.log('Craps: You crapped out! -3 chips');
+	}
+}
+
+function spawnEnemies() {
+	// Clear existing enemies
+	enemies.length = 0;
+	
+	// Spawn enemies for current wave - much fewer enemies
+	const enemyCount = Math.min(2 + Math.floor(currentWave / 2), 6); // Start with 2, max 6 enemies
+	for (let i = 0; i < enemyCount; i++) {
+		let x, y;
+		// Find empty spot
+		do {
+			x = Math.random() * (MAP_W - 2) + 1;
+			y = Math.random() * (MAP_H - 2) + 1;
+		} while (isWallAt(x, y) || Math.hypot(x - player1.x, y - player1.y) < 3);
+		
+		enemies.push({
+			x: x,
+			y: y,
+			radius: 0.14,
+			speed: 1.3 + currentWave * 0.1, // Enemies get faster each wave
+			health: 3 + Math.floor(currentWave / 2), // More health each wave
+			color: '#c44',
+			scale: 0.55
+		});
+	}
+	enemiesToKill = enemyCount;
+	enemiesKilled = 0;
+	waveInProgress = true;
+}
+
+function checkWaveComplete() {
+	if (enemies.length === 0 && enemiesKilled >= enemiesToKill && waveInProgress) {
+		waveInProgress = false;
+		playerChips += currentWave * 2; // Bonus chips for completing wave
+		roundCompleteMessage = 3; // Show message for 3 seconds
+		console.log(`Wave ${currentWave} complete! Go to Wave Control to start next wave.`);
+	}
+}
+
+function startNextWave() {
+	if (!waveInProgress && enemies.length === 0) {
+		currentWave++;
+		console.log(`Starting Wave ${currentWave}`);
+		spawnEnemies();
 	}
 }
 
@@ -589,7 +852,16 @@ function bjResolve(doubled = false) {
     else if (pt > dt) won = true;
     else if (pt === dt) push = true;
     bj.finished = true;
-    if (won) { playerChips += Math.max(1, bj.stake); weapon.rate = Math.max(0.18, weapon.rate - 0.01); }
+    if (won) { 
+        playerChips += Math.max(1, bj.stake); 
+        // Chance for upgrade when winning
+        if (Math.random() < 0.3) { // 30% chance
+            const upgradeTypes = ['damage', 'fireRate', 'maxHP', 'ammoCapacity', 'speed'];
+            const randomUpgrade = upgradeTypes[Math.floor(Math.random() * upgradeTypes.length)];
+            upgrades[randomUpgrade] += 0.1;
+            console.log(`Upgrade gained: ${randomUpgrade} +0.1`);
+        }
+    }
     else if (!push) { playerHP = Math.max(0, playerHP - 1); }
     updateBjUI();
 }
@@ -631,6 +903,9 @@ window.addEventListener('keydown', (e) => {
     }
     if (e.key === 'r' || e.key === 'R') {
         reload();
+    }
+    if (e.key === 'e' || e.key === 'E') {
+        interactWithTable();
     }
 });
 
