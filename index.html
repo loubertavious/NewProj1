@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>HTML Raycaster (Doom‑style)</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+	<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="style.css">
+</head>
+<body>
+	<canvas id="game"></canvas>
+	<div id="health"><div id="health-fill"></div><div id="health-text">HP</div></div>
+	<div id="score">SCORE 000000</div>
+	<div id="hud">
+		<div id="title">Raycaster Test</div>
+		<div id="info">Click canvas to lock mouse. Move: WASD/QE, Look: Mouse, Fire: Left Click.</div>
+		<div id="stats"></div>
+	</div>
+	<!-- Blackjack overlay -->
+	<div id="bj-overlay" class="hidden">
+		<div class="panel">
+			<div class="row">
+				<div>Chips: <span id="bj-chips-val">0</span></div>
+				<div>Stake: <input id="bj-stake" type="number" min="1" value="1"></div>
+			</div>
+			<div class="row buttons">
+				<button id="bj-deal">1 Deal</button>
+				<button id="bj-hit">2 Hit</button>
+				<button id="bj-stand">3 Stand</button>
+				<button id="bj-double">4 Double</button>
+			</div>
+			<div id="bj-table" class="hidden">
+				<div>Dealer: <span id="bj-dealer-cards"></span> <span id="bj-dealer-total"></span></div>
+				<div>You: <span id="bj-player-cards"></span> <span id="bj-player-total"></span></div>
+				<div id="bj-status"></div>
+				<div class="row"><button id="bj-continue" class="hidden">Continue</button></div>
+			</div>
+			<div class="hint">Press B to toggle table • Actions: G=Deal, H=Hit, J=Stand, K=Double • WASD: stake +/- and button focus</div>
+		</div>
+	</div>
+	<script src="game.js"></script>
+</body>
+</html>
+
