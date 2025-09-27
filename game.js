@@ -79,12 +79,12 @@ const enemies = [
 
 // Casino tables
 const casinoTables = [
-	{ x: 6.5, y: 6.5, type: 'blackjack', name: 'Blackjack Table', color: '#8B4513', radius: 0.3 },
+	{ x: 2.5, y: 2.5, type: 'blackjack', name: 'Blackjack Table', color: '#8B4513', radius: 0.3 },
 	{ x: 9.5, y: 9.5, type: 'poker', name: 'Poker Table', color: '#654321', radius: 0.3 },
 	{ x: 12.5, y: 6.5, type: 'roulette', name: 'Roulette Wheel', color: '#FFD700', radius: 0.3 },
 	{ x: 6.5, y: 12.5, type: 'slots', name: 'Slot Machine', color: '#FF69B4', radius: 0.2 },
 	{ x: 9.5, y: 12.5, type: 'craps', name: 'Craps Table', color: '#32CD32', radius: 0.3 },
-	{ x: 2.5, y: 2.5, type: 'wavecontrol', name: 'Wave Control', color: '#FF0000', radius: 0.3 }
+	{ x: 2.5, y: 14.5, type: 'wavecontrol', name: 'Wave Control', color: '#FF0000', radius: 0.3 }
 ];
 
 // Shooting state and player stats
@@ -96,6 +96,24 @@ let playerScore = 0;
 let damageFlash = 0; // red screen tint timer
 let paused = false; // pause when menus are open
 let roundCompleteMessage = 0; // timer for round complete message
+
+// Casino game UI state
+let casinoGameOpen = false;
+let currentCasinoGame = null;
+let casinoGameResult = null;
+let casinoGameResultTimer = 0;
+
+// Blackjack table state
+let blackjackTableOpen = false;
+let blackjackTableGame = {
+    playerHand: [],
+    dealerHand: [],
+    playerTotal: 0,
+    dealerTotal: 0,
+    gameState: 'waiting', // waiting, playing, finished
+    bet: 1,
+    shoe: []
+};
 
 // Casino/Wave system
 let currentWave = 1;
@@ -245,6 +263,7 @@ function update(dt) {
         if (weapon.recoil > 0) weapon.recoil -= dt * 3;
         if (damageFlash > 0) damageFlash = Math.max(0, damageFlash - dt * 1.8);
         if (roundCompleteMessage > 0) roundCompleteMessage -= dt;
+        if (casinoGameResultTimer > 0) casinoGameResultTimer -= dt;
         
         // Check wave completion
         checkWaveComplete();
@@ -434,6 +453,177 @@ function drawRoundCompleteMessage() {
     }
 }
 
+function drawCasinoGameResult() {
+    if (casinoGameResultTimer > 0 && casinoGameResult) {
+        const cx = Math.floor(INTERNAL_WIDTH / 2);
+        const cy = Math.floor(INTERNAL_HEIGHT / 2);
+        
+        // Determine colors based on result type
+        let bgColor, borderColor, textColor;
+        switch (casinoGameResult.type) {
+            case 'win':
+                bgColor = 'rgba(0, 100, 0, 0.8)';
+                borderColor = 'rgba(0, 255, 0, 0.8)';
+                textColor = 'rgba(0, 255, 0, 1)';
+                break;
+            case 'lose':
+                bgColor = 'rgba(100, 0, 0, 0.8)';
+                borderColor = 'rgba(255, 0, 0, 0.8)';
+                textColor = 'rgba(255, 0, 0, 1)';
+                break;
+            case 'error':
+                bgColor = 'rgba(100, 100, 0, 0.8)';
+                borderColor = 'rgba(255, 255, 0, 0.8)';
+                textColor = 'rgba(255, 255, 0, 1)';
+                break;
+        }
+        
+        // Draw background
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(cx - 100, cy - 25, 200, 50);
+        
+        // Draw border
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(cx - 100, cy - 25, 200, 50);
+        
+        // Draw text
+        ctx.fillStyle = textColor;
+        ctx.font = 'bold 14px JetBrains Mono';
+        ctx.textAlign = 'center';
+        ctx.fillText(casinoGameResult.message, cx, cy);
+        
+        // Draw chip count if available
+        if (casinoGameResult.chips) {
+            ctx.font = '12px JetBrains Mono';
+            const chipText = casinoGameResult.chips > 0 ? `+${casinoGameResult.chips} chips` : `${casinoGameResult.chips} chips`;
+            ctx.fillText(chipText, cx, cy + 15);
+        }
+    }
+}
+
+function drawBlackjackTable() {
+    if (!blackjackTableOpen) return;
+    
+    const cx = Math.floor(INTERNAL_WIDTH / 2);
+    const cy = Math.floor(INTERNAL_HEIGHT / 2);
+    
+    // Draw table background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.fillRect(cx - 150, cy - 100, 300, 200);
+    
+    // Draw table border
+    ctx.strokeStyle = 'rgba(139, 69, 19, 0.8)';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(cx - 150, cy - 100, 300, 200);
+    
+    // Draw title
+    ctx.fillStyle = 'rgba(255, 255, 255, 1)';
+    ctx.font = 'bold 16px JetBrains Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText('BLACKJACK TABLE', cx, cy - 80);
+    
+    // Draw bet info
+    ctx.font = '12px JetBrains Mono';
+    ctx.fillText(`Bet: ${blackjackTableGame.bet} chips | Your Chips: ${playerChips}`, cx, cy - 60);
+    
+    // Draw dealer section
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.font = '14px JetBrains Mono';
+    ctx.fillText('Dealer:', cx - 100, cy - 30);
+    
+    // Draw dealer cards
+    let dealerX = cx - 100;
+    for (let i = 0; i < blackjackTableGame.dealerHand.length; i++) {
+        const card = blackjackTableGame.dealerHand[i];
+        const cardValue = card === 11 ? 'A' : card.toString();
+        
+        // Draw card background
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.fillRect(dealerX, cy - 20, 30, 40);
+        
+        // Draw card border
+        ctx.strokeStyle = 'rgba(0, 0, 0, 1)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(dealerX, cy - 20, 30, 40);
+        
+        // Draw card value
+        ctx.fillStyle = 'rgba(0, 0, 0, 1)';
+        ctx.font = 'bold 12px JetBrains Mono';
+        ctx.textAlign = 'center';
+        ctx.fillText(cardValue, dealerX + 15, cy + 5);
+        
+        dealerX += 35;
+    }
+    
+    // Draw dealer total
+    if (blackjackTableGame.gameState === 'playing') {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.font = '12px JetBrains Mono';
+        ctx.textAlign = 'left';
+        ctx.fillText(`Total: ${blackjackTableGame.dealerHand[0]} + ?`, cx - 100, cy + 30);
+    } else if (blackjackTableGame.gameState === 'finished') {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.font = '12px JetBrains Mono';
+        ctx.textAlign = 'left';
+        ctx.fillText(`Total: ${blackjackTableGame.dealerTotal}`, cx - 100, cy + 30);
+    }
+    
+    // Draw player section
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.font = '14px JetBrains Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText('Your Hand:', cx, cy + 50);
+    
+    // Draw player cards
+    let playerX = cx - 50;
+    for (let i = 0; i < blackjackTableGame.playerHand.length; i++) {
+        const card = blackjackTableGame.playerHand[i];
+        const cardValue = card === 11 ? 'A' : card.toString();
+        
+        // Draw card background
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.fillRect(playerX, cy + 60, 30, 40);
+        
+        // Draw card border
+        ctx.strokeStyle = 'rgba(0, 0, 0, 1)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(playerX, cy + 60, 30, 40);
+        
+        // Draw card value
+        ctx.fillStyle = 'rgba(0, 0, 0, 1)';
+        ctx.font = 'bold 12px JetBrains Mono';
+        ctx.textAlign = 'center';
+        ctx.fillText(cardValue, playerX + 15, cy + 85);
+        
+        playerX += 35;
+    }
+    
+    // Draw player total
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.font = '12px JetBrains Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Total: ${blackjackTableGame.playerTotal}`, cx, cy + 110);
+    
+    // Draw buttons based on game state
+    ctx.font = '12px JetBrains Mono';
+    ctx.textAlign = 'center';
+    
+    if (blackjackTableGame.gameState === 'waiting') {
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.8)';
+        ctx.fillText('Press SPACE to Deal', cx, cy + 130);
+        ctx.fillText('Press ESC to Close', cx, cy + 145);
+    } else if (blackjackTableGame.gameState === 'playing') {
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.8)';
+        ctx.fillText('Press H to Hit, S to Stand', cx, cy + 130);
+        ctx.fillText('Press ESC to Close', cx, cy + 145);
+    } else if (blackjackTableGame.gameState === 'finished') {
+        ctx.fillStyle = 'rgba(255, 255, 0, 0.8)';
+        ctx.fillText('Press SPACE for New Hand', cx, cy + 130);
+        ctx.fillText('Press ESC to Close', cx, cy + 145);
+    }
+}
+
 function drawCrosshair() {
     const cx = Math.floor(INTERNAL_WIDTH / 2);
     const cy = Math.floor(INTERNAL_HEIGHT / 2);
@@ -559,6 +749,8 @@ function render() {
         drawCrosshair();
         drawGun();
         drawRoundCompleteMessage();
+        drawCasinoGameResult();
+        drawBlackjackTable();
     }
 }
 
@@ -672,7 +864,7 @@ function interactWithTable() {
 	
 	switch (table.type) {
 		case 'blackjack':
-			bjOpen();
+			openBlackjackTable();
 			break;
 		case 'poker':
 			playPoker();
@@ -692,52 +884,197 @@ function interactWithTable() {
 	}
 }
 
+function openBlackjackTable() {
+	if (blackjackTableOpen) {
+		closeBlackjackTable();
+		return;
+	}
+	
+	if (playerChips < blackjackTableGame.bet) {
+		casinoGameResult = { type: 'error', message: `Not enough chips! Need ${blackjackTableGame.bet} chips.` };
+		casinoGameResultTimer = 2;
+		return;
+	}
+	
+	blackjackTableOpen = true;
+	paused = true;
+	blackjackTableGame.gameState = 'waiting';
+	blackjackTableGame.playerHand = [];
+	blackjackTableGame.dealerHand = [];
+	blackjackTableGame.shoe = buildBlackjackShoe();
+}
+
+function closeBlackjackTable() {
+	blackjackTableOpen = false;
+	paused = false;
+	blackjackTableGame.gameState = 'waiting';
+}
+
+function buildBlackjackShoe() {
+	const cards = [];
+	const ranks = [2,3,4,5,6,7,8,9,10,10,10,10,11]; // 11 = Ace
+	for (let d = 0; d < 4; d++) { // 4 decks
+		for (let s = 0; s < 4; s++) { // 4 suits
+			for (let r = 0; r < ranks.length; r++) {
+				cards.push(ranks[r]);
+			}
+		}
+	}
+	// Shuffle
+	for (let i = cards.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[cards[i], cards[j]] = [cards[j], cards[i]];
+	}
+	return cards;
+}
+
+function dealBlackjackHand() {
+	if (blackjackTableGame.gameState !== 'waiting') return;
+	if (playerChips < blackjackTableGame.bet) return;
+	
+	playerChips -= blackjackTableGame.bet;
+	blackjackTableGame.playerHand = [blackjackTableGame.shoe.pop(), blackjackTableGame.shoe.pop()];
+	blackjackTableGame.dealerHand = [blackjackTableGame.shoe.pop(), blackjackTableGame.shoe.pop()];
+	blackjackTableGame.gameState = 'playing';
+	updateBlackjackTotals();
+}
+
+function hitBlackjack() {
+	if (blackjackTableGame.gameState !== 'playing') return;
+	
+	blackjackTableGame.playerHand.push(blackjackTableGame.shoe.pop());
+	updateBlackjackTotals();
+	
+	if (blackjackTableGame.playerTotal > 21) {
+		blackjackTableGame.gameState = 'finished';
+		casinoGameResult = { type: 'lose', message: 'Bust! You went over 21.', chips: -blackjackTableGame.bet };
+		casinoGameResultTimer = 3;
+	}
+}
+
+function standBlackjack() {
+	if (blackjackTableGame.gameState !== 'playing') return;
+	
+	// Dealer plays
+	while (blackjackTableGame.dealerTotal < 17) {
+		blackjackTableGame.dealerHand.push(blackjackTableGame.shoe.pop());
+		updateBlackjackTotals();
+	}
+	
+	blackjackTableGame.gameState = 'finished';
+	
+	// Determine winner
+	let result;
+	if (blackjackTableGame.dealerTotal > 21) {
+		result = { type: 'win', message: 'Dealer bust! You win!', chips: blackjackTableGame.bet };
+		playerChips += blackjackTableGame.bet * 2;
+	} else if (blackjackTableGame.playerTotal > blackjackTableGame.dealerTotal) {
+		result = { type: 'win', message: 'You win!', chips: blackjackTableGame.bet };
+		playerChips += blackjackTableGame.bet * 2;
+	} else if (blackjackTableGame.playerTotal === blackjackTableGame.dealerTotal) {
+		result = { type: 'win', message: 'Push! Tie game.', chips: 0 };
+		playerChips += blackjackTableGame.bet; // Return bet
+	} else {
+		result = { type: 'lose', message: 'Dealer wins!', chips: -blackjackTableGame.bet };
+	}
+	
+	casinoGameResult = result;
+	casinoGameResultTimer = 3;
+}
+
+function updateBlackjackTotals() {
+	blackjackTableGame.playerTotal = calculateBlackjackTotal(blackjackTableGame.playerHand);
+	blackjackTableGame.dealerTotal = calculateBlackjackTotal(blackjackTableGame.dealerHand);
+}
+
+function calculateBlackjackTotal(hand) {
+	let total = 0;
+	let aces = 0;
+	
+	for (const card of hand) {
+		if (card === 11) {
+			aces++;
+			total += 11;
+		} else {
+			total += card;
+		}
+	}
+	
+	// Adjust aces
+	while (total > 21 && aces > 0) {
+		total -= 10;
+		aces--;
+	}
+	
+	return total;
+}
+
 function playPoker() {
-	if (playerChips < 2) return;
+	if (playerChips < 2) {
+		casinoGameResult = { type: 'error', message: 'Not enough chips! Need 2 chips.' };
+		casinoGameResultTimer = 2;
+		return;
+	}
 	playerChips -= 2;
 	const win = Math.random() < 0.4; // 40% win rate
 	if (win) {
 		playerChips += 5;
-		console.log('Poker: You won! +5 chips');
+		casinoGameResult = { type: 'win', message: 'You won! +5 chips', chips: 5 };
 	} else {
-		console.log('Poker: You lost! -2 chips');
+		casinoGameResult = { type: 'lose', message: 'You lost! -2 chips', chips: -2 };
 	}
+	casinoGameResultTimer = 3;
 }
 
 function playRoulette() {
-	if (playerChips < 1) return;
+	if (playerChips < 1) {
+		casinoGameResult = { type: 'error', message: 'Not enough chips! Need 1 chip.' };
+		casinoGameResultTimer = 2;
+		return;
+	}
 	playerChips -= 1;
 	const win = Math.random() < 0.35; // 35% win rate
 	if (win) {
 		playerChips += 3;
-		console.log('Roulette: You won! +3 chips');
+		casinoGameResult = { type: 'win', message: 'You won! +3 chips', chips: 3 };
 	} else {
-		console.log('Roulette: You lost! -1 chip');
+		casinoGameResult = { type: 'lose', message: 'You lost! -1 chip', chips: -1 };
 	}
+	casinoGameResultTimer = 3;
 }
 
 function playSlots() {
-	if (playerChips < 1) return;
+	if (playerChips < 1) {
+		casinoGameResult = { type: 'error', message: 'Not enough chips! Need 1 chip.' };
+		casinoGameResultTimer = 2;
+		return;
+	}
 	playerChips -= 1;
 	const win = Math.random() < 0.25; // 25% win rate
 	if (win) {
 		playerChips += 4;
-		console.log('Slots: JACKPOT! +4 chips');
+		casinoGameResult = { type: 'win', message: 'JACKPOT! +4 chips', chips: 4 };
 	} else {
-		console.log('Slots: Try again! -1 chip');
+		casinoGameResult = { type: 'lose', message: 'Try again! -1 chip', chips: -1 };
 	}
+	casinoGameResultTimer = 3;
 }
 
 function playCraps() {
-	if (playerChips < 3) return;
+	if (playerChips < 3) {
+		casinoGameResult = { type: 'error', message: 'Not enough chips! Need 3 chips.' };
+		casinoGameResultTimer = 2;
+		return;
+	}
 	playerChips -= 3;
 	const win = Math.random() < 0.45; // 45% win rate
 	if (win) {
 		playerChips += 6;
-		console.log('Craps: Snake eyes! +6 chips');
+		casinoGameResult = { type: 'win', message: 'Snake eyes! +6 chips', chips: 6 };
 	} else {
-		console.log('Craps: You crapped out! -3 chips');
+		casinoGameResult = { type: 'lose', message: 'You crapped out! -3 chips', chips: -3 };
 	}
+	casinoGameResultTimer = 3;
 }
 
 function spawnEnemies() {
@@ -906,6 +1243,26 @@ window.addEventListener('keydown', (e) => {
     }
     if (e.key === 'e' || e.key === 'E') {
         interactWithTable();
+    }
+    
+    // Blackjack table controls
+    if (blackjackTableOpen) {
+        if (e.key === 'Escape') {
+            closeBlackjackTable();
+        } else if (e.key === ' ') {
+            e.preventDefault();
+            if (blackjackTableGame.gameState === 'waiting') {
+                dealBlackjackHand();
+            } else if (blackjackTableGame.gameState === 'finished') {
+                blackjackTableGame.gameState = 'waiting';
+                blackjackTableGame.playerHand = [];
+                blackjackTableGame.dealerHand = [];
+            }
+        } else if (e.key === 'h' || e.key === 'H') {
+            hitBlackjack();
+        } else if (e.key === 's' || e.key === 'S') {
+            standBlackjack();
+        }
     }
 });
 
