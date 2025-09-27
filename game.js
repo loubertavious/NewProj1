@@ -395,7 +395,7 @@ document.addEventListener('pointerlockchange', () => {
 });
 
 document.addEventListener('mousemove', (e) => {
-    if (document.pointerLockElement === canvas) {
+    if (document.pointerLockElement === canvas && !paused && !bj.open) {
         const sensitivityX = 0.0016; // reduced horizontal sensitivity
         const sensitivityY = 0.0020;
         player1.angle += e.movementX * sensitivityX;
@@ -409,7 +409,7 @@ document.addEventListener('mousemove', (e) => {
 // Shooting
 canvas.addEventListener('mousedown', (e) => {
 	if (document.pointerLockElement !== canvas) canvas.requestPointerLock();
-	if (e.button === 0) {
+	if (e.button === 0 && !paused && !bj.open) {
 		tryShoot();
 	}
 });
@@ -477,6 +477,8 @@ function bjOpen() {
     updateBjUI();
     const el = document.getElementById('bj-overlay');
     if (el) el.classList.remove('hidden');
+    paused = true;
+    if (document.pointerLockElement) document.exitPointerLock();
 }
 
 function bjClose() {
@@ -484,6 +486,8 @@ function bjClose() {
     updateBjUI();
     const el = document.getElementById('bj-overlay');
     if (el) el.classList.add('hidden');
+    paused = false;
+    if (document.pointerLockElement !== canvas) canvas.requestPointerLock();
 }
 
 function bjDeal() {
