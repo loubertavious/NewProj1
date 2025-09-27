@@ -78,7 +78,7 @@ const enemies = [
 ];
 
 // Shooting state and player stats
-const weapon = { cooldown: 0, rate: 0.25, flash: 0 };
+const weapon = { cooldown: 0, rate: 0.8, flash: 0, recoil: 0, ammo: 8, maxAmmo: 8 };
 let playerHP = 5;
 const playerMaxHP = 5;
 let playerChips = 10;
@@ -209,6 +209,7 @@ function update(dt) {
     if (!isPaused) {
         if (weapon.cooldown > 0) weapon.cooldown -= dt;
         if (weapon.flash > 0) weapon.flash -= dt;
+        if (weapon.recoil > 0) weapon.recoil -= dt * 3;
         if (damageFlash > 0) damageFlash = Math.max(0, damageFlash - dt * 1.8);
     }
 }
@@ -342,6 +343,69 @@ function drawCrosshair() {
     ctx.stroke();
 }
 
+// Gun sprite data
+let gunSprite = null;
+let gunSpriteLoaded = false;
+
+function loadGunSprite() {
+    const img = new Image();
+    img.onload = function() {
+        gunSprite = img;
+        gunSpriteLoaded = true;
+        console.log('Gun sprite loaded successfully');
+    };
+    img.onerror = function() {
+        console.error('Failed to load gun.png, trying fallback sprite');
+        // Try to load the original file as fallback
+        const fallbackImg = new Image();
+        fallbackImg.onload = function() {
+            gunSprite = fallbackImg;
+            gunSpriteLoaded = true;
+            console.log('Fallback gun sprite loaded successfully');
+        };
+        fallbackImg.onerror = function() {
+            console.error('All gun sprites failed to load');
+            gunSpriteLoaded = true; // Set to true to prevent infinite loading
+        };
+        fallbackImg.src = 'sprites/New Piskel-1.png.png';
+    };
+    img.src = 'sprites/gun.png';
+}
+
+
+function drawGun() {
+    // Don't draw if sprite isn't loaded yet
+    if (!gunSpriteLoaded) {
+        return;
+    }
+    
+    const gunWidth = 100;
+    const gunHeight = 75;
+    const gunX = Math.floor(INTERNAL_WIDTH - gunWidth - 0); // Position on right side
+    const gunY = Math.floor(INTERNAL_HEIGHT - gunHeight - 0);
+    
+    // Apply recoil offset (shotguns have more kick)
+    const recoilOffset = Math.sin(weapon.recoil * Math.PI) * 15;
+    const finalGunY = gunY + recoilOffset;
+    
+    // Draw the gun sprite
+    ctx.drawImage(gunSprite, gunX, finalGunY, gunWidth, gunHeight);
+    
+    // Muzzle flash effect (shotgun spread)
+    if (weapon.flash > 0) {
+        const flashIntensity = weapon.flash * 2;
+        // Wide outer flash (shotgun spread)
+        ctx.fillStyle = `rgba(255, 255, 200, ${flashIntensity * 0.6})`;
+        ctx.fillRect(gunX + 5, finalGunY + 15, 20, 25);
+        // Inner flash
+        ctx.fillStyle = `rgba(255, 200, 0, ${flashIntensity})`;
+        ctx.fillRect(gunX + 8, finalGunY + 18, 14, 19);
+        // Core flash
+        ctx.fillStyle = `rgba(255, 100, 0, ${flashIntensity * 1.2})`;
+        ctx.fillRect(gunX + 10, finalGunY + 22, 10, 11);
+    }
+}
+
 function render() {
     if (SPLIT) {
         const halfW = Math.floor(INTERNAL_WIDTH / 2);
@@ -362,7 +426,10 @@ function render() {
     	ctx.fillStyle = `rgba(200,0,0,${Math.min(0.45, damageFlash)})`;
     	ctx.fillRect(0, 0, INTERNAL_WIDTH, INTERNAL_HEIGHT);
     }
-    if (!SPLIT) drawCrosshair();
+    if (!SPLIT) {
+        drawCrosshair();
+        drawGun();
+    }
 }
 
 let last = performance.now();
@@ -374,7 +441,7 @@ function loop(t) {
 	render();
     fps = Math.round(1 / dt);
     const stats = document.getElementById('stats');
-    if (stats) stats.textContent = `HP:${Math.ceil(playerHP)} Chips:${playerChips} Score:${playerScore} | x:${player1.x.toFixed(2)} y:${player1.y.toFixed(2)} a:${(player1.angle%(Math.PI*2)).toFixed(2)} enemies:${enemies.length} fps:${fps}`;
+    if (stats) stats.textContent = `HP:${Math.ceil(playerHP)} Ammo:${weapon.ammo}/${weapon.maxAmmo} Chips:${playerChips} Score:${playerScore} | x:${player1.x.toFixed(2)} y:${player1.y.toFixed(2)} a:${(player1.angle%(Math.PI*2)).toFixed(2)} enemies:${enemies.length} fps:${fps}`;
     const scoreEl = document.getElementById('score');
     if (scoreEl) scoreEl.textContent = `SCORE ${String(playerScore).padStart(6,'0')}`;
     const hpFill = document.getElementById('health-fill');
@@ -384,6 +451,9 @@ function loop(t) {
 	requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
+
+// Load gun sprite when game starts
+loadGunSprite();
 
 // Pointer Lock for mouse look (Player 1)
 canvas.addEventListener('click', () => {
@@ -415,9 +485,11 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 function tryShoot() {
-	if (weapon.cooldown > 0) return;
+	if (weapon.cooldown > 0 || weapon.ammo <= 0) return;
 	weapon.cooldown = weapon.rate;
 	weapon.flash = 0.08;
+	weapon.recoil = 1.0; // Add recoil animation
+	weapon.ammo--; // Consume ammo
 	// hitscan along center
 	const centerAngle = player1.angle;
 	const ray = castRay(player1.x, player1.y, centerAngle);
@@ -441,6 +513,13 @@ function tryShoot() {
 	}
 	if (bestIdx !== -1) {
 		enemies[bestIdx].health -= 1;
+	}
+}
+
+function reload() {
+	if (weapon.ammo < weapon.maxAmmo && playerChips >= 1) {
+		weapon.ammo = weapon.maxAmmo;
+		playerChips -= 1; // Cost 1 chip to reload
 	}
 }
 
@@ -549,6 +628,9 @@ function updateBjUI(isDealt = false) {
 window.addEventListener('keydown', (e) => {
     if (e.key === 'b' || e.key === 'B') {
         if (bj.open) bjClose(); else bjOpen();
+    }
+    if (e.key === 'r' || e.key === 'R') {
+        reload();
     }
 });
 
