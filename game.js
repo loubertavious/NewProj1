@@ -96,12 +96,77 @@ let playerScore = 0;
 let damageFlash = 0; // red screen tint timer
 let paused = false; // pause when menus are open
 let roundCompleteMessage = 0; // timer for round complete message
+let pendingPerkChoices = []; // offered perks after wave
 
 // Casino game UI state
 let casinoGameOpen = false;
 let currentCasinoGame = null;
 let casinoGameResult = null;
 let casinoGameResultTimer = 0;
+
+// Generic table overlay state
+let tableMenuOpen = false;
+let selectedTable = null;
+let unmountCurrentTableGame = null; // cleanup function for mounted game UI
+
+// Resolve and mount a table game module by type. Returns unmount fn or null.
+async function loadAndMountTableGame(type, container) {
+	const setLoading = (on) => {
+		const hint = document.getElementById('table-hint');
+		if (hint) hint.textContent = on ? 'Loading…' : 'Enter: Play • Esc: Close';
+	};
+	setLoading(true);
+	try {
+		switch (type) {
+				case 'blackjack':
+					setLoading(false);
+					return mountBlackjack(container, {
+						getStake: () => Math.max(1, bj.stake|0),
+						setStake: (n) => { bj.stake = Math.max(1, Math.floor(n)); updateTableOverlay(); },
+						debit: (n) => { if (playerChips >= n) { playerChips -= n; updateTableOverlay(); return true; } return false; },
+						credit: (n) => { playerChips += n; updateTableOverlay(); },
+						close: () => { closeTableMenu(); }
+					});
+			case 'roulette':
+				setLoading(false);
+				return mountRoulette(container, {
+					playerChips,
+					debit: (n) => { if (playerChips >= n) { playerChips -= n; updateTableOverlay(); return true; } return false; },
+					credit: (n) => { playerChips += n; updateTableOverlay(); },
+					close: () => { closeTableMenu(); }
+				});
+			case 'slots':
+				setLoading(false);
+				return mountSlots(container, {
+					playerChips,
+					debit: (n) => { if (playerChips >= n) { playerChips -= n; updateTableOverlay(); return true; } return false; },
+					credit: (n) => { playerChips += n; updateTableOverlay(); },
+					close: () => { closeTableMenu(); }
+				});
+			case 'poker':
+				setLoading(false);
+				return mountPoker(container, {
+					playerChips,
+					debit: (n) => { if (playerChips >= n) { playerChips -= n; updateTableOverlay(); return true; } return false; },
+					credit: (n) => { playerChips += n; updateTableOverlay(); },
+					close: () => { closeTableMenu(); }
+				});
+			case 'craps':
+				setLoading(false);
+				return mountCraps(container, {
+					playerChips,
+					debit: (n) => { if (playerChips >= n) { playerChips -= n; updateTableOverlay(); return true; } return false; },
+					credit: (n) => { playerChips += n; updateTableOverlay(); },
+					close: () => { closeTableMenu(); }
+				});
+			default:
+				setLoading(false);
+				return null;
+		}
+	} finally {
+		setLoading(false);
+	}
+}
 
 // Blackjack table state
 let blackjackTableOpen = false;
@@ -131,6 +196,15 @@ const upgrades = {
     ammoCapacity: 8, // max ammo
     speed: 1        // movement speed multiplier
 };
+
+// Perk definitions
+const allPerks = [
+	{ id: 'perk-dmg', name: 'Damage +0.2', apply: () => { upgrades.damage += 0.2; } },
+	{ id: 'perk-fire', name: 'Fire Rate +10%', apply: () => { upgrades.fireRate += 0.1; } },
+	{ id: 'perk-hp', name: 'Max HP +1', apply: () => { upgrades.maxHP += 1; /* also heal to new max */ playerMaxHP = upgrades.maxHP; playerHP = Math.min(playerMaxHP, playerHP + 1); } },
+	{ id: 'perk-ammo', name: 'Ammo Capacity +2', apply: () => { upgrades.ammoCapacity += 2; weapon.maxAmmo = Math.max(weapon.maxAmmo, upgrades.ammoCapacity); } },
+	{ id: 'perk-speed', name: 'Speed +10%', apply: () => { upgrades.speed += 0.1; player1.moveSpeed *= 1.1; } }
+];
 
 const keys = new Set();
 window.addEventListener('keydown', (e) => {
@@ -401,7 +475,7 @@ function renderCasinoTables(px, py, angle, fov, pitch, xOffset, width, height) {
 		if (Math.abs(rel) > fov / 2 + 0.2) continue;
 
 		const corrected = dist * Math.cos(rel);
-        const scale = 0.8; // Casino tables are larger than enemies
+		const scale = 0.6; // Shrink table sprites
         const spriteH = Math.min(height, Math.floor((height / corrected) * scale));
         const spriteW = spriteH; // billboard square
 		const centerX = Math.floor(xOffset + (rel / fov + 0.5) * width);
@@ -763,7 +837,13 @@ function loop(t) {
 	render();
     fps = Math.round(1 / dt);
     const stats = document.getElementById('stats');
-    if (stats) stats.textContent = `Wave:${currentWave} HP:${Math.ceil(playerHP)} Ammo:${weapon.ammo}/${weapon.maxAmmo} Chips:${playerChips} | Enemies:${enemies.length}/${enemiesToKill} Killed:${enemiesKilled} Score:${playerScore}`;
+    if (stats) {
+    	const reloadCost = Math.max(0, weapon.maxAmmo - weapon.ammo);
+    	const reloadCostHtml = (playerChips >= reloadCost)
+		? String(reloadCost)
+		: `<span style="color:#ff6666" title="Not enough chips">${reloadCost}</span>`;
+    	stats.innerHTML = `Wave:${currentWave} HP:${Math.ceil(playerHP)} Ammo:${weapon.ammo}/${weapon.maxAmmo} Reload:${reloadCostHtml} Chips:${playerChips} | Enemies:${enemies.length}/${enemiesToKill} Killed:${enemiesKilled} Score:${playerScore}`;
+    }
     const scoreEl = document.getElementById('score');
     if (scoreEl) scoreEl.textContent = `SCORE ${String(playerScore).padStart(6,'0')}`;
     const hpFill = document.getElementById('health-fill');
@@ -842,9 +922,12 @@ function tryShoot() {
 }
 
 function reload() {
-	if (weapon.ammo < weapon.maxAmmo && playerChips >= 1) {
-		weapon.ammo = weapon.maxAmmo;
-		playerChips -= 1; // Cost 1 chip to reload
+	if (weapon.ammo < weapon.maxAmmo) {
+		const cost = weapon.maxAmmo - weapon.ammo; // cost equals bullets needed to fill
+		if (playerChips >= cost) {
+			weapon.ammo = weapon.maxAmmo;
+			playerChips -= cost;
+		}
 	}
 }
 
@@ -861,27 +944,9 @@ function getNearbyTable() {
 function interactWithTable() {
 	const table = getNearbyTable();
 	if (!table) return;
-	
-	switch (table.type) {
-		case 'blackjack':
-			openBlackjackTable();
-			break;
-		case 'poker':
-			playPoker();
-			break;
-		case 'roulette':
-			playRoulette();
-			break;
-		case 'slots':
-			playSlots();
-			break;
-		case 'craps':
-			playCraps();
-			break;
-		case 'wavecontrol':
-			startNextWave();
-			break;
-	}
+    
+    // Use generic overlay for all tables (including Blackjack)
+    openTableMenu(table);
 }
 
 function openBlackjackTable() {
@@ -1107,12 +1172,13 @@ function spawnEnemies() {
 }
 
 function checkWaveComplete() {
-	if (enemies.length === 0 && enemiesKilled >= enemiesToKill && waveInProgress) {
-		waveInProgress = false;
-		playerChips += currentWave * 2; // Bonus chips for completing wave
-		roundCompleteMessage = 3; // Show message for 3 seconds
-		console.log(`Wave ${currentWave} complete! Go to Wave Control to start next wave.`);
-	}
+    if (enemies.length === 0 && enemiesKilled >= enemiesToKill && waveInProgress) {
+        waveInProgress = false;
+        playerChips += currentWave * 2; // Bonus chips for completing wave
+        roundCompleteMessage = 3; // Show message for 3 seconds
+        console.log(`Wave ${currentWave} complete! Go to Wave Control to start next wave.`);
+        maybeOfferPerk();
+    }
 }
 
 function startNextWave() {
@@ -1121,6 +1187,48 @@ function startNextWave() {
 		console.log(`Starting Wave ${currentWave}`);
 		spawnEnemies();
 	}
+}
+
+// ---- Perk UI Logic ----
+function openPerksOverlay(choices) {
+	const overlay = document.getElementById('perks-overlay');
+	const list = document.getElementById('perks-list');
+	const skip = document.getElementById('perks-skip');
+	if (!overlay || !list) return;
+	list.innerHTML = '';
+	for (const perk of choices) {
+		const item = document.createElement('div');
+		item.className = 'perk';
+		const title = document.createElement('div'); title.textContent = perk.name;
+		const pick = document.createElement('button'); pick.textContent = 'Pick';
+		pick.addEventListener('click', () => { applyPerk(perk); closePerksOverlay(); });
+		item.appendChild(title); item.appendChild(pick);
+		list.appendChild(item);
+	}
+	if (skip) {
+		skip.onclick = () => { closePerksOverlay(); };
+	}
+	paused = true;
+	if (document.pointerLockElement) document.exitPointerLock();
+	overlay.classList.remove('hidden');
+}
+
+function closePerksOverlay() {
+	const overlay = document.getElementById('perks-overlay');
+	if (!overlay) return;
+	overlay.classList.add('hidden');
+	paused = false;
+	if (document.pointerLockElement !== canvas) canvas.requestPointerLock();
+}
+
+function applyPerk(perk) { try { perk.apply(); } catch (_) {} }
+
+function maybeOfferPerk() {
+	// 1 guaranteed perk choice every wave for now; pick 3 random unique perks
+	const pool = allPerks.slice();
+	for (let i = pool.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
+	const choices = pool.slice(0, 3);
+	openPerksOverlay(choices);
 }
 
 // Blackjack minimal engine
@@ -1167,6 +1275,80 @@ function bjClose() {
     if (el) el.classList.add('hidden');
     paused = false;
     if (document.pointerLockElement !== canvas) canvas.requestPointerLock();
+}
+
+// ---- Generic Table Overlay Logic ----
+function getTableCost(table) {
+	switch (table.type) {
+		case 'poker': return 2;
+		case 'roulette': return 1;
+		case 'slots': return 1;
+		case 'craps': return 3;
+		case 'blackjack': return Math.max(1, bj.stake|0);
+		case 'wavecontrol': return 0;
+		default: return 0;
+	}
+}
+
+function updateTableOverlay() {
+	if (!selectedTable) return;
+	const overlay = document.getElementById('table-overlay');
+	const title = document.getElementById('table-title');
+	const desc = document.getElementById('table-desc');
+	const content = document.getElementById('table-content');
+	const hint = document.getElementById('table-hint');
+	const playBtn = document.getElementById('table-play');
+	if (!overlay) return;
+	if (title) title.textContent = selectedTable.name || 'Table';
+	let description = '';
+	const cost = getTableCost(selectedTable);
+	switch (selectedTable.type) {
+		case 'poker': description = `Cost: ${cost} chips. 40% win chance (+5 chips on win).`; break;
+		case 'roulette': description = `Cost: ${cost} chip. 35% win chance (+3 chips on win).`; break;
+		case 'slots': description = `Cost: ${cost} chip. 25% win chance (+4 chips on win).`; break;
+		case 'craps': description = `Cost: ${cost} chips. 45% win chance (+6 chips on win).`; break;
+		case 'wavecontrol':
+			if (!waveInProgress && enemies.length === 0) description = `Start Wave ${currentWave + 1}`;
+			else if (waveInProgress) description = `Wave ${currentWave} in progress`;
+			else description = 'Clear enemies first';
+			break;
+	}
+    if (desc) desc.textContent = description;
+    // Only clear content when no game is mounted (initial open)
+    if (content && !unmountCurrentTableGame) content.innerHTML = '';
+	if (playBtn) {
+		if (selectedTable.type === 'wavecontrol') {
+			const ok = !waveInProgress && enemies.length === 0;
+			playBtn.disabled = !ok;
+			playBtn.textContent = ok ? 'Start Wave' : 'Unavailable';
+		} else {
+			const affordable = playerChips >= cost;
+			playBtn.disabled = !affordable;
+			playBtn.textContent = affordable ? 'Play' : 'Not enough chips';
+		}
+	}
+	if (hint) hint.textContent = 'Enter: Play • Esc: Close';
+}
+
+function openTableMenu(table) {
+	selectedTable = table;
+	tableMenuOpen = true;
+	paused = true;
+	const el = document.getElementById('table-overlay');
+	if (el) el.classList.remove('hidden');
+	if (document.pointerLockElement) document.exitPointerLock();
+	updateTableOverlay();
+}
+
+function closeTableMenu() {
+	tableMenuOpen = false;
+	selectedTable = null;
+	if (typeof unmountCurrentTableGame === 'function') { try { unmountCurrentTableGame(); } catch (_) {} }
+	unmountCurrentTableGame = null;
+	const el = document.getElementById('table-overlay');
+	if (el) el.classList.add('hidden');
+	paused = false;
+	if (document.pointerLockElement !== canvas) canvas.requestPointerLock();
 }
 
 function bjDeal() {
@@ -1242,7 +1424,18 @@ window.addEventListener('keydown', (e) => {
         reload();
     }
     if (e.key === 'e' || e.key === 'E') {
-        interactWithTable();
+		// If menu is open, close it; otherwise interact
+		if (tableMenuOpen) closeTableMenu(); else interactWithTable();
+    }
+    if (tableMenuOpen) {
+    	// basic Enter/Escape support while table menu is open
+    	if (e.key === 'Enter') {
+    		const btn = document.getElementById('table-play');
+    		if (btn && !btn.disabled) btn.click();
+    	}
+    	if (e.key === 'Escape') {
+    		closeTableMenu();
+    	}
     }
     
     // Blackjack table controls
@@ -1279,6 +1472,234 @@ if (hitBtn) hitBtn.addEventListener('click', bjHit);
 if (standBtn) standBtn.addEventListener('click', bjStand);
 if (doubleBtn) doubleBtn.addEventListener('click', () => { if (playerChips >= bj.stake) { playerChips -= bj.stake; bjDouble(); updateBjUI(true); }});
 if (contBtn) contBtn.addEventListener('click', () => { bj.player = []; bj.dealer = []; bj.finished = false; updateBjUI(); });
+
+// Generic table overlay buttons
+const tablePlayBtn = document.getElementById('table-play');
+const tableCloseBtn = document.getElementById('table-close');
+if (tablePlayBtn) tablePlayBtn.addEventListener('click', async () => {
+	if (!selectedTable) return;
+	// Mount selected game module UI into overlay
+	const content = document.getElementById('table-content');
+	if (!content) return;
+	if (typeof unmountCurrentTableGame === 'function') { try { unmountCurrentTableGame(); } catch (_) {} }
+	unmountCurrentTableGame = null;
+	unmountCurrentTableGame = await loadAndMountTableGame(selectedTable.type, content);
+});
+if (tableCloseBtn) tableCloseBtn.addEventListener('click', () => { closeTableMenu(); });
+
+// ----------------- Roulette Module -----------------
+function mountRoulette(container, api) {
+	// Build simple UI
+	const root = document.createElement('div');
+	root.style.display = 'flex';
+	root.style.flexDirection = 'column';
+	root.style.gap = '8px';
+
+	const balance = document.createElement('div');
+	const betInput = document.createElement('input');
+	betInput.type = 'number'; betInput.min = '1'; betInput.value = '1'; betInput.style.width = '80px';
+	const playBtn = document.createElement('button'); playBtn.textContent = 'Spin';
+	const result = document.createElement('div'); result.style.minHeight = '18px';
+
+	root.appendChild(balance);
+	const row = document.createElement('div');
+	row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center';
+	const label = document.createElement('span'); label.textContent = 'Bet:';
+	row.appendChild(label); row.appendChild(betInput); row.appendChild(playBtn);
+	root.appendChild(row);
+	root.appendChild(result);
+	container.appendChild(root);
+
+	function sync() {
+		balance.textContent = `Chips: ${playerChips}`;
+	}
+	sync();
+
+	function playOnce() {
+		const stake = Math.max(1, Math.floor(Number(betInput.value) || 1));
+		if (!api.debit(stake)) { result.textContent = 'Not enough chips.'; return; }
+		// 35% win chance, +3 payout like existing simple roulette
+		const win = Math.random() < 0.35;
+		if (win) {
+			api.credit(3);
+			result.textContent = 'You won! +3 chips';
+		} else {
+			result.textContent = `You lost! -${stake} chip${stake!==1?'s':''}`;
+		}
+		sync();
+	}
+
+	playBtn.addEventListener('click', playOnce);
+
+	// Return unmount cleanup
+	return () => {
+		playBtn.removeEventListener('click', playOnce);
+		try { container.removeChild(root); } catch (_) {}
+	};
+}
+
+// ----------------- Slots Module -----------------
+function mountSlots(container, api) {
+	const root = document.createElement('div');
+	root.style.display = 'flex';
+	root.style.flexDirection = 'column';
+	root.style.gap = '8px';
+
+	const balance = document.createElement('div');
+	const row = document.createElement('div');
+	row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center';
+	const betLabel = document.createElement('span'); betLabel.textContent = 'Bet:';
+	const betInput = document.createElement('input'); betInput.type = 'number'; betInput.min = '1'; betInput.value = '1'; betInput.style.width = '80px';
+	const spinBtn = document.createElement('button'); spinBtn.textContent = 'Spin';
+
+	const reels = document.createElement('div');
+	reels.style.display = 'grid';
+	reels.style.gridTemplateColumns = 'repeat(3, 50px)';
+	reels.style.gap = '6px';
+	const symbols = ['🍒','🔔','⭐','7','🍋','💎'];
+	const reelEls = [0,1,2].map(() => {
+		const el = document.createElement('div');
+		el.textContent = '❔';
+		el.style.textAlign = 'center';
+		el.style.fontSize = '20px';
+		el.style.padding = '6px 0';
+		el.style.background = 'rgba(255,255,255,0.05)';
+		el.style.border = '1px solid rgba(255,255,255,0.12)';
+		el.style.borderRadius = '4px';
+		reels.appendChild(el);
+		return el;
+	});
+
+	const result = document.createElement('div'); result.style.minHeight = '18px';
+
+	root.appendChild(balance);
+	row.appendChild(betLabel); row.appendChild(betInput); row.appendChild(spinBtn);
+	root.appendChild(row);
+	root.appendChild(reels);
+	root.appendChild(result);
+	container.appendChild(root);
+
+	function sync() { balance.textContent = `Chips: ${playerChips}`; }
+	sync();
+
+	function spinOnce() {
+		const stake = Math.max(1, Math.floor(Number(betInput.value) || 1));
+		if (!api.debit(stake)) { result.textContent = 'Not enough chips.'; return; }
+		// Basic slots: roll 3 symbols; payout:
+		// 3 of a kind: +4 chips; any 2 of a kind: +2 chips; else lose stake
+		const roll = [0,0,0].map(() => symbols[(Math.random() * symbols.length) | 0]);
+		reelEls.forEach((el, i) => { el.textContent = roll[i]; });
+		let payout = 0;
+		if (roll[0] === roll[1] && roll[1] === roll[2]) payout = 4;
+		else if (roll[0] === roll[1] || roll[0] === roll[2] || roll[1] === roll[2]) payout = 2;
+		if (payout > 0) {
+			api.credit(payout);
+			result.textContent = `Win! +${payout} chips`;
+		} else {
+			result.textContent = `No match. -${stake} chip${stake!==1?'s':''}`;
+		}
+		sync();
+	}
+
+	spinBtn.addEventListener('click', spinOnce);
+
+	return () => {
+		spinBtn.removeEventListener('click', spinOnce);
+		try { container.removeChild(root); } catch (_) {}
+	};
+}
+
+// ----------------- Poker Module (Simple Draw-like) -----------------
+function mountPoker(container, api) {
+	const root = document.createElement('div');
+	root.style.display = 'flex'; root.style.flexDirection = 'column'; root.style.gap = '8px';
+	const balance = document.createElement('div');
+	const controls = document.createElement('div'); controls.style.display = 'flex'; controls.style.gap = '8px';
+	const betLabel = document.createElement('span'); betLabel.textContent = 'Bet:';
+	const betInput = document.createElement('input'); betInput.type='number'; betInput.min='1'; betInput.value='2'; betInput.style.width='80px';
+	const dealBtn = document.createElement('button'); dealBtn.textContent = 'Deal';
+	const result = document.createElement('div'); result.style.minHeight = '18px';
+
+	const handRow = document.createElement('div'); handRow.style.display = 'flex'; handRow.style.gap = '8px';
+	const cardEls = [0,1,2].map(() => {
+		const el = document.createElement('div');
+		el.style.minWidth = '40px'; el.style.textAlign='center'; el.style.padding='6px 0';
+		el.style.border='1px solid rgba(255,255,255,0.12)'; el.style.borderRadius='4px';
+		el.textContent = '—'; handRow.appendChild(el); return el;
+	});
+
+	root.appendChild(balance);
+	controls.appendChild(betLabel); controls.appendChild(betInput); controls.appendChild(dealBtn); root.appendChild(controls);
+	root.appendChild(handRow); root.appendChild(result);
+	container.appendChild(root);
+
+	function sync() { balance.textContent = `Chips: ${playerChips}`; }
+	sync();
+
+	function deal() {
+		const stake = Math.max(1, Math.floor(Number(betInput.value)||2));
+		if (!api.debit(stake)) { result.textContent = 'Not enough chips.'; return; }
+		// Three-card quick poker: combinations (approx):
+		//  - Three of a kind: +5
+		//  - Straight (A-2-3 or 1-2-3 or 2-3-4 etc): +3
+		//  - Pair: +2
+		//  - Else: lose stake
+		const ranks = [1,2,3,4,5,6,7,8,9,10,11,12,13];
+		const hand = [0,0,0].map(() => ranks[(Math.random()*ranks.length)|0]);
+		cardEls.forEach((el,i)=>{ el.textContent = String(hand[i]); });
+		hand.sort((a,b)=>a-b);
+		let payout = 0;
+		const [a,b,c] = hand;
+		if (a===b && b===c) payout = 5;
+		else if ((a+1===b && b+1===c) || (a===1 && b===2 && c===3)) payout = 3;
+		else if (a===b || a===c || b===c) payout = 2;
+		if (payout>0) { api.credit(payout); result.textContent = `Win! +${payout} chips`; }
+		else { result.textContent = `Fold. -${stake} chip${stake!==1?'s':''}`; }
+		sync();
+	}
+
+	dealBtn.addEventListener('click', deal);
+	return () => { dealBtn.removeEventListener('click', deal); try{container.removeChild(root);}catch(_){} };
+}
+
+// ----------------- Craps Module (Very Simplified) -----------------
+function mountCraps(container, api) {
+	const root = document.createElement('div');
+	root.style.display='flex'; root.style.flexDirection='column'; root.style.gap='8px';
+	const balance = document.createElement('div');
+	const controls = document.createElement('div'); controls.style.display='flex'; controls.style.gap='8px';
+	const betLabel = document.createElement('span'); betLabel.textContent = 'Bet:';
+	const betInput = document.createElement('input'); betInput.type='number'; betInput.min='1'; betInput.value='3'; betInput.style.width='80px';
+	const rollBtn = document.createElement('button'); rollBtn.textContent = 'Roll';
+	const diceRow = document.createElement('div'); diceRow.style.display='flex'; diceRow.style.gap='8px';
+	const d1 = document.createElement('div'); const d2 = document.createElement('div');
+	[d1,d2].forEach(el=>{ el.style.minWidth='40px'; el.style.textAlign='center'; el.style.padding='6px 0'; el.style.border='1px solid rgba(255,255,255,0.12)'; el.style.borderRadius='4px'; el.textContent='—'; diceRow.appendChild(el); });
+	const result = document.createElement('div'); result.style.minHeight='18px';
+
+	root.appendChild(balance);
+	controls.appendChild(betLabel); controls.appendChild(betInput); controls.appendChild(rollBtn); root.appendChild(controls);
+	root.appendChild(diceRow); root.appendChild(result);
+	container.appendChild(root);
+
+	function sync(){ balance.textContent = `Chips: ${playerChips}`; }
+	sync();
+
+	function roll(){
+		const stake = Math.max(1, Math.floor(Number(betInput.value)||3));
+		if (!api.debit(stake)) { result.textContent = 'Not enough chips.'; return; }
+		// Simplified craps: win on 7 or 11 (+6), lose on 2,3,12; otherwise +0 (push): refund stake
+		const die1 = 1 + ((Math.random()*6)|0); const die2 = 1 + ((Math.random()*6)|0);
+		d1.textContent = String(die1); d2.textContent = String(die2);
+		const sum = die1 + die2;
+		if (sum === 7 || sum === 11) { api.credit(6); result.textContent = 'Winner! +6 chips'; }
+		else if (sum === 2 || sum === 3 || sum === 12) { result.textContent = `Craps. -${stake} chip${stake!==1?'s':''}`; }
+		else { api.credit(stake); result.textContent = 'Push. Bet returned.'; }
+		sync();
+	}
+
+	rollBtn.addEventListener('click', roll);
+	return () => { rollBtn.removeEventListener('click', roll); try{container.removeChild(root);}catch(_){} };
+}
 
 function bjAdjustStake(delta) {
     bj.stake = Math.max(1, Math.floor(bj.stake + delta));

@@ -41,6 +41,31 @@
 			<div class="hint">Press B to toggle table • Actions: G=Deal, H=Hit, J=Stand, K=Double • WASD: stake +/- and button focus</div>
 		</div>
 	</div>
+	<!-- Generic Table overlay -->
+	<div id="table-overlay" class="hidden">
+		<div class="panel">
+			<div id="table-title" class="title">Table</div>
+			<div id="table-desc" class="desc"></div>
+			<div id="table-content"></div>
+			<div class="row buttons">
+				<button id="table-play">Play</button>
+				<button id="table-close">Close</button>
+			</div>
+			<div id="table-hint" class="hint"></div>
+		</div>
+	</div>
+
+	<!-- Perks overlay -->
+	<div id="perks-overlay" class="hidden">
+		<div class="panel">
+			<div class="title">Choose a Perk</div>
+			<div id="perks-list" class="list"></div>
+			<div class="row buttons">
+				<button id="perks-skip">Skip</button>
+			</div>
+			<div class="hint">Pick one perk to apply immediately. Esc to close.</div>
+		</div>
+	</div>
 	<script src="game.js"></script>
 </body>
 </html>
