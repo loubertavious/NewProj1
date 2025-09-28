@@ -69,6 +69,7 @@ function createPlayer(x, y, angle) {
 }
 
 const player1 = createPlayer(3.5, 3.5, 0);
+const BASE_MOVE_SPEED = player1.moveSpeed;
 const player2 = createPlayer(5.5, 5.5, Math.PI * 0.75);
 
 // Enemies
@@ -84,19 +85,21 @@ const casinoTables = [
 	{ x: 12.5, y: 6.5, type: 'roulette', name: 'Roulette Wheel', color: '#FFD700', radius: 0.3 },
 	{ x: 6.5, y: 12.5, type: 'slots', name: 'Slot Machine', color: '#FF69B4', radius: 0.2 },
 	{ x: 9.5, y: 12.5, type: 'craps', name: 'Craps Table', color: '#32CD32', radius: 0.3 },
-	{ x: 2.5, y: 14.5, type: 'wavecontrol', name: 'Wave Control', color: '#FF0000', radius: 0.3 }
+	{ x: 2.5, y: 14.5, type: 'wavecontrol', name: 'Wave Control', color: '#FF0000', radius: 0.3 },
+	{ x: 4.5, y: 14.5, type: 'perkslots', name: 'Perk Slots', color: '#AA00FF', radius: 0.3 }
 ];
 
 // Shooting state and player stats
 const weapon = { cooldown: 0, rate: 0.8, flash: 0, recoil: 0, ammo: 8, maxAmmo: 8 };
 let playerHP = 5;
-const playerMaxHP = 5;
+let playerMaxHP = 5;
 let playerChips = 10;
 let playerScore = 0;
 let damageFlash = 0; // red screen tint timer
 let paused = false; // pause when menus are open
 let roundCompleteMessage = 0; // timer for round complete message
 let pendingPerkChoices = []; // offered perks after wave
+let nextWaveAutoTimer = 0; // seconds until auto-start of next wave
 
 // Casino game UI state
 let casinoGameOpen = false;
@@ -159,6 +162,13 @@ async function loadAndMountTableGame(type, container) {
 					credit: (n) => { playerChips += n; updateTableOverlay(); },
 					close: () => { closeTableMenu(); }
 				});
+				case 'perkslots':
+					setLoading(false);
+					return mountPerkSlots(container, {
+						debit: (n) => { if (playerChips >= n) { playerChips -= n; updateTableOverlay(); return true; } return false; },
+						credit: (n) => { /* perk slots don't credit chips */ },
+						close: () => { closeTableMenu(); }
+					});
 			default:
 				setLoading(false);
 				return null;
@@ -197,13 +207,22 @@ const upgrades = {
     speed: 1        // movement speed multiplier
 };
 
+function syncUpgradesToStats() {
+	// Apply upgrade side-effects to live stats
+	player1.moveSpeed = BASE_MOVE_SPEED * upgrades.speed;
+	playerMaxHP = Math.max(1, Math.round(upgrades.maxHP));
+	playerHP = Math.min(playerHP, playerMaxHP);
+	const cap = Math.max(1, Math.round(upgrades.ammoCapacity));
+	if (cap > weapon.maxAmmo) weapon.maxAmmo = cap;
+}
+
 // Perk definitions
 const allPerks = [
-	{ id: 'perk-dmg', name: 'Damage +0.2', apply: () => { upgrades.damage += 0.2; } },
-	{ id: 'perk-fire', name: 'Fire Rate +10%', apply: () => { upgrades.fireRate += 0.1; } },
-	{ id: 'perk-hp', name: 'Max HP +1', apply: () => { upgrades.maxHP += 1; /* also heal to new max */ playerMaxHP = upgrades.maxHP; playerHP = Math.min(playerMaxHP, playerHP + 1); } },
-	{ id: 'perk-ammo', name: 'Ammo Capacity +2', apply: () => { upgrades.ammoCapacity += 2; weapon.maxAmmo = Math.max(weapon.maxAmmo, upgrades.ammoCapacity); } },
-	{ id: 'perk-speed', name: 'Speed +10%', apply: () => { upgrades.speed += 0.1; player1.moveSpeed *= 1.1; } }
+	{ id: 'perk-dmg', name: 'Damage +0.2', apply: () => { upgrades.damage = round2(upgrades.damage + 0.2); } },
+	{ id: 'perk-fire', name: 'Fire Rate +10%', apply: () => { upgrades.fireRate = round2(upgrades.fireRate + 0.1); } },
+	{ id: 'perk-hp', name: 'Max HP +1 (heal to full)', apply: () => { upgrades.maxHP = Math.round(upgrades.maxHP + 1); playerHP = Math.round(upgrades.maxHP); } },
+	{ id: 'perk-ammo', name: 'Ammo Capacity +2', apply: () => { upgrades.ammoCapacity = Math.round(upgrades.ammoCapacity + 2); } },
+	{ id: 'perk-speed', name: 'Speed +10%', apply: () => { upgrades.speed = round2(upgrades.speed + 0.1); } }
 ];
 
 const keys = new Set();
@@ -342,6 +361,14 @@ function update(dt) {
         // Check wave completion
         checkWaveComplete();
     }
+
+    // Auto-start next wave timer counts down regardless of pause state
+    if (!waveInProgress && enemies.length === 0 && nextWaveAutoTimer > 0) {
+        nextWaveAutoTimer = Math.max(0, nextWaveAutoTimer - dt);
+        if (nextWaveAutoTimer === 0) {
+            startNextWave();
+        }
+    }
 }
 
 function castRay(px, py, rayAngle) {
@@ -443,20 +470,35 @@ function renderEnemies(px, py, angle, fov, pitch, xOffset, width, height) {
 		const left = Math.floor(centerX - spriteW / 2);
 		const right = Math.floor(centerX + spriteW / 2);
 
-		// color shading by distance
-		const shade = Math.max(0, Math.min(1, 1 - corrected / 10));
-		let r = 196 * shade;
-		let g = 64 * shade;
-		let b = 64 * shade;
-		ctx.fillStyle = `rgb(${r|0}, ${g|0}, ${b|0})`;
+        // draw either sprite image or fallback colored rect
+        if (enemySpriteLoaded && enemySprite) {
+            // Draw per-column 1px slices with depth test to avoid showing through walls
+            for (let sx = left; sx <= right; sx++) {
+                if (sx < xOffset || sx >= xOffset + width) continue;
+                const bufX = sx; // xOffset already applied
+                if (bufX < 0 || bufX >= depthBuffer.length) continue;
+                if (corrected >= depthBuffer[bufX]) continue; // occluded by wall
 
-		for (let sx = left; sx <= right; sx++) {
-			if (sx < xOffset || sx >= xOffset + width) continue;
-			const bufX = sx; // xOffset already applied
-			if (bufX < 0 || bufX >= depthBuffer.length) continue;
-			if (corrected >= depthBuffer[bufX]) continue; // occluded by wall
-			ctx.fillRect(sx, top, 1, spriteH);
-		}
+                const u = (sx - left) / Math.max(1, spriteW);
+                const srcX = Math.floor(u * enemySprite.width);
+                // draw a 1px vertical slice
+                ctx.drawImage(enemySprite, srcX, 0, 1, enemySprite.height, sx, top, 1, spriteH);
+            }
+        } else {
+            // color shading by distance
+            const shade = Math.max(0, Math.min(1, 1 - corrected / 10));
+            let r = 196 * shade;
+            let g = 64 * shade;
+            let b = 64 * shade;
+            ctx.fillStyle = `rgb(${r|0}, ${g|0}, ${b|0})`;
+            for (let sx = left; sx <= right; sx++) {
+                if (sx < xOffset || sx >= xOffset + width) continue;
+                const bufX = sx; // xOffset already applied
+                if (bufX < 0 || bufX >= depthBuffer.length) continue;
+                if (corrected >= depthBuffer[bufX]) continue; // occluded by wall
+                ctx.fillRect(sx, top, 1, spriteH);
+            }
+        }
 	}
 }
 
@@ -524,6 +566,22 @@ function drawRoundCompleteMessage() {
         ctx.font = '12px JetBrains Mono';
         ctx.fillText(`Wave ${currentWave} cleared`, cx, cy + 15);
         ctx.fillText(`+${currentWave * 2} chips`, cx, cy + 30);
+    }
+
+    // Draw auto-start timer banner at top when applicable
+    if (!waveInProgress && enemies.length === 0 && nextWaveAutoTimer > 0) {
+        const msg = `Auto-start in ${Math.ceil(nextWaveAutoTimer)}s (press K to start now)`;
+        ctx.font = 'bold 12px JetBrains Mono';
+        const textWidth = Math.ceil(ctx.measureText(msg).width);
+        const padX = 6; const padY = 3;
+        const boxW = textWidth + padX * 2; const boxH = 12 + padY * 2;
+        const x = Math.floor((INTERNAL_WIDTH - boxW) / 2);
+        const y = 6;
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(x, y, boxW, boxH);
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.textAlign = 'center';
+        ctx.fillText(msg, Math.floor(INTERNAL_WIDTH / 2), y + boxH - padY - 1);
     }
 }
 
@@ -763,6 +821,25 @@ function loadGunSprite() {
 }
 
 
+// Enemy sprite data
+let enemySprite = null;
+let enemySpriteLoaded = false;
+
+function loadEnemySprite() {
+	const img = new Image();
+	img.onload = function() {
+		enemySprite = img;
+		enemySpriteLoaded = true;
+		console.log('Enemy sprite loaded successfully');
+	};
+	img.onerror = function() {
+		console.warn('Failed to load sprites/enemy.png; using fallback rectangles');
+		enemySpriteLoaded = false; // fallback to rectangle rendering
+	};
+	img.src = 'sprites/enemy.png';
+}
+
+
 function drawGun() {
     // Don't draw if sprite isn't loaded yet
     if (!gunSpriteLoaded) {
@@ -856,6 +933,7 @@ requestAnimationFrame(loop);
 
 // Load gun sprite when game starts
 loadGunSprite();
+loadEnemySprite();
 
 // Start first wave
 spawnEnemies();
@@ -1178,6 +1256,7 @@ function checkWaveComplete() {
         roundCompleteMessage = 3; // Show message for 3 seconds
         console.log(`Wave ${currentWave} complete! Go to Wave Control to start next wave.`);
         maybeOfferPerk();
+        nextWaveAutoTimer = 60; // start 60s countdown to auto-start next wave
     }
 }
 
@@ -1186,6 +1265,7 @@ function startNextWave() {
 		currentWave++;
 		console.log(`Starting Wave ${currentWave}`);
 		spawnEnemies();
+        nextWaveAutoTimer = 0; // cancel countdown if started manually or auto
 	}
 }
 
@@ -1205,9 +1285,7 @@ function openPerksOverlay(choices) {
 		item.appendChild(title); item.appendChild(pick);
 		list.appendChild(item);
 	}
-	if (skip) {
-		skip.onclick = () => { closePerksOverlay(); };
-	}
+    if (skip) { skip.onclick = () => { closePerksOverlay(); }; }
 	paused = true;
 	if (document.pointerLockElement) document.exitPointerLock();
 	overlay.classList.remove('hidden');
@@ -1221,14 +1299,11 @@ function closePerksOverlay() {
 	if (document.pointerLockElement !== canvas) canvas.requestPointerLock();
 }
 
-function applyPerk(perk) { try { perk.apply(); } catch (_) {} }
+function round2(x){ return Math.round(x*100)/100; }
+function applyPerk(perk) { try { perk.apply(); syncUpgradesToStats(); } catch (_) {} }
 
 function maybeOfferPerk() {
-	// 1 guaranteed perk choice every wave for now; pick 3 random unique perks
-	const pool = allPerks.slice();
-	for (let i = pool.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
-	const choices = pool.slice(0, 3);
-	openPerksOverlay(choices);
+	// Disabled auto-offer; perks now purchasable via Perk Slots
 }
 
 // Blackjack minimal engine
@@ -1285,6 +1360,7 @@ function getTableCost(table) {
 		case 'slots': return 1;
 		case 'craps': return 3;
 		case 'blackjack': return Math.max(1, bj.stake|0);
+		case 'perkslots': return 3; // price to spin for a perk
 		case 'wavecontrol': return 0;
 		default: return 0;
 	}
@@ -1307,6 +1383,7 @@ function updateTableOverlay() {
 		case 'roulette': description = `Cost: ${cost} chip. 35% win chance (+3 chips on win).`; break;
 		case 'slots': description = `Cost: ${cost} chip. 25% win chance (+4 chips on win).`; break;
 		case 'craps': description = `Cost: ${cost} chips. 45% win chance (+6 chips on win).`; break;
+		case 'perkslots': description = `Cost: ${cost} chips. Spin to roll 3 perks; reroll costs 2.`; break;
 		case 'wavecontrol':
 			if (!waveInProgress && enemies.length === 0) description = `Start Wave ${currentWave + 1}`;
 			else if (waveInProgress) description = `Wave ${currentWave} in progress`;
@@ -1415,17 +1492,20 @@ function updateBjUI(isDealt = false) {
     }
 }
 
-// BJ buttons and keybind
+// BJ buttons and keybind (disable old B overlay toggle)
 window.addEventListener('keydown', (e) => {
-    if (e.key === 'b' || e.key === 'B') {
-        if (bj.open) bjClose(); else bjOpen();
-    }
     if (e.key === 'r' || e.key === 'R') {
         reload();
     }
     if (e.key === 'e' || e.key === 'E') {
 		// If menu is open, close it; otherwise interact
 		if (tableMenuOpen) closeTableMenu(); else interactWithTable();
+    }
+    // Allow K to immediately start next wave during countdown
+    if (e.key === 'k' || e.key === 'K') {
+        if (!waveInProgress && enemies.length === 0 && nextWaveAutoTimer > 0) {
+            startNextWave();
+        }
     }
     if (tableMenuOpen) {
     	// basic Enter/Escape support while table menu is open
@@ -1510,12 +1590,10 @@ function mountRoulette(container, api) {
 	root.appendChild(result);
 	container.appendChild(root);
 
-	function sync() {
-		balance.textContent = `Chips: ${playerChips}`;
-	}
+    function sync() { balance.textContent = `Chips: ${playerChips}`; }
 	sync();
 
-	function playOnce() {
+    function playOnce() {
 		const stake = Math.max(1, Math.floor(Number(betInput.value) || 1));
 		if (!api.debit(stake)) { result.textContent = 'Not enough chips.'; return; }
 		// 35% win chance, +3 payout like existing simple roulette
@@ -1526,7 +1604,7 @@ function mountRoulette(container, api) {
 		} else {
 			result.textContent = `You lost! -${stake} chip${stake!==1?'s':''}`;
 		}
-		sync();
+        sync();
 	}
 
 	playBtn.addEventListener('click', playOnce);
@@ -1606,6 +1684,150 @@ function mountSlots(container, api) {
 	return () => {
 		spinBtn.removeEventListener('click', spinOnce);
 		try { container.removeChild(root); } catch (_) {}
+	};
+}
+
+// ----------------- Perk Slots Module -----------------
+function mountPerkSlots(container, api) {
+    const root = document.createElement('div');
+    root.style.display='flex'; root.style.flexDirection='column'; root.style.gap='8px';
+    const info = document.createElement('div'); info.textContent = 'Spin to roll 3 perks, pick 1. Reroll is discounted.';
+    const row = document.createElement('div'); row.style.display='flex'; row.style.gap='8px'; row.style.alignItems='center';
+    const costLabel = document.createElement('span');
+    const spinBtn = document.createElement('button'); spinBtn.textContent = 'Spin';
+    const rerollBtn = document.createElement('button'); rerollBtn.textContent = 'Reroll'; rerollBtn.disabled = true;
+    const res = document.createElement('div'); res.style.minHeight='18px';
+    const list = document.createElement('div'); list.style.display='flex'; list.style.flexDirection='column'; list.style.gap='6px';
+
+    row.appendChild(costLabel); row.appendChild(spinBtn); row.appendChild(rerollBtn);
+    root.appendChild(info); root.appendChild(row); root.appendChild(list); root.appendChild(res);
+    container.appendChild(root);
+
+    let currentChoices = [];
+    let rerollAvailable = false;
+    const baseCost = 3;
+    const rerollCost = 2;
+
+    function updateCosts() {
+        costLabel.textContent = rerollAvailable ? `Reroll: ${rerollCost} chips` : `Spin: ${baseCost} chips`;
+    }
+    updateCosts();
+
+    function renderChoices() {
+        list.innerHTML = '';
+        for (const perk of currentChoices) {
+            const item = document.createElement('div');
+            item.className = 'perk';
+            const title = document.createElement('div'); title.textContent = perk.name;
+            const pick = document.createElement('button'); pick.textContent = 'Pick';
+            pick.addEventListener('click', () => { try { applyPerk(perk); res.textContent = `Gained perk: ${perk.name}`; } catch (_) {} });
+            item.appendChild(title); item.appendChild(pick);
+            list.appendChild(item);
+        }
+    }
+
+    function rollThree() {
+        // shuffle and pick 3 unique perks
+        const pool = allPerks.slice();
+        for (let i = pool.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
+        currentChoices = pool.slice(0, 3);
+        renderChoices();
+    }
+
+    function spin() {
+        if (!api.debit(baseCost)) { res.textContent = 'Not enough chips.'; return; }
+        rerollAvailable = true; rerollBtn.disabled = false; updateCosts();
+        rollThree();
+        res.textContent = 'Choose one perk or reroll.';
+    }
+
+    function reroll() {
+        if (!rerollAvailable) return;
+        if (!api.debit(rerollCost)) { res.textContent = 'Not enough chips for reroll.'; return; }
+        rollThree();
+        res.textContent = 'Rerolled. Choose one perk.';
+    }
+
+    spinBtn.addEventListener('click', spin);
+    rerollBtn.addEventListener('click', reroll);
+    return () => { spinBtn.removeEventListener('click', spin); rerollBtn.removeEventListener('click', reroll); try{container.removeChild(root);}catch(_){} };
+}
+
+// ----------------- Blackjack Module (uses existing bj logic) -----------------
+function mountBlackjack(container, api) {
+	const root = document.createElement('div');
+	root.style.display='flex'; root.style.flexDirection='column'; root.style.gap='8px';
+	const balance = document.createElement('div');
+	const stakeRow = document.createElement('div'); stakeRow.style.display='flex'; stakeRow.style.gap='8px';
+	const stakeLabel = document.createElement('span'); stakeLabel.textContent = 'Stake:';
+	const stakeInput2 = document.createElement('input'); stakeInput2.type='number'; stakeInput2.min='1'; stakeInput2.value=String(Math.max(1,bj.stake|0)); stakeInput2.style.width='80px';
+	const dealBtn2 = document.createElement('button'); dealBtn2.textContent='Deal';
+	const actionRow = document.createElement('div'); actionRow.style.display='flex'; actionRow.style.gap='8px';
+	const hitBtn2 = document.createElement('button'); hitBtn2.textContent='Hit';
+	const standBtn2 = document.createElement('button'); standBtn2.textContent='Stand';
+	const doubleBtn2 = document.createElement('button'); doubleBtn2.textContent='Double';
+	const status2 = document.createElement('div'); status2.style.minHeight='18px';
+
+	const dealerRow = document.createElement('div');
+	const playerRow = document.createElement('div');
+
+	root.appendChild(balance);
+	stakeRow.appendChild(stakeLabel); stakeRow.appendChild(stakeInput2); stakeRow.appendChild(dealBtn2); root.appendChild(stakeRow);
+	actionRow.appendChild(hitBtn2); actionRow.appendChild(standBtn2); actionRow.appendChild(doubleBtn2); root.appendChild(actionRow);
+	root.appendChild(dealerRow); root.appendChild(playerRow); root.appendChild(status2);
+	container.appendChild(root);
+
+	function render() {
+		balance.textContent = `Chips: ${playerChips}`;
+		dealerRow.textContent = `Dealer: ${bj.dealer.map(v=>v===11?'A':String(v)).join(' ')} (${bjTotal(bj.dealer)})`;
+		playerRow.textContent = `You: ${bj.player.map(v=>v===11?'A':String(v)).join(' ')} (${bjTotal(bj.player)})`;
+		status2.textContent = bj.finished ? 'Hand over.' : (bj.player.length ? 'Your move.' : '');
+	}
+
+	function ensureShoe(){ if (bj.shoe.length < 30) bj.shoe = bjBuildShoe(4); }
+
+	function onStakeChange(){ api.setStake(Number(stakeInput2.value)||1); }
+	stakeInput2.addEventListener('change', onStakeChange);
+
+	function onDeal(){
+		if (bj.player.length>0 && !bj.finished) return;
+		const stake = api.getStake();
+		if (!api.debit(stake)) { status2.textContent = 'Not enough chips.'; return; }
+		bj.player = []; bj.dealer = []; bj.finished = false; ensureShoe();
+		bj.player = [bj.shoe.pop(), bj.shoe.pop()];
+		bj.dealer = [bj.shoe.pop(), bj.shoe.pop()];
+		render();
+	}
+	function onHit(){ if (bj.finished || bj.player.length===0) return; bj.player.push(bj.shoe.pop()); if (bjTotal(bj.player)>21) { bj.finished=true; status2.textContent='Bust!'; } render(); }
+	function onStand(){
+		if (bj.finished || bj.player.length===0) return;
+		while (bjTotal(bj.dealer) < 17) bj.dealer.push(bj.shoe.pop());
+		const pt=bjTotal(bj.player), dt=bjTotal(bj.dealer); let msg='';
+		if (pt>21) msg='Bust!'; else if (dt>21||pt>dt) { api.credit(api.getStake()*2); msg='You win!'; }
+		else if (pt===dt) { api.credit(api.getStake()); msg='Push'; }
+		else msg='Dealer wins';
+		bj.finished=true; status2.textContent=msg; render();
+	}
+	function onDouble(){
+		if (bj.finished || bj.player.length===0) return;
+		const stake = api.getStake(); if (!api.debit(stake)) { status2.textContent='Not enough chips to double.'; return; }
+		bj.player.push(bj.shoe.pop()); onStand();
+	}
+
+	dealBtn2.addEventListener('click', onDeal);
+	hitBtn2.addEventListener('click', onHit);
+	standBtn2.addEventListener('click', onStand);
+	doubleBtn2.addEventListener('click', onDouble);
+
+	render();
+
+	return () => {
+		dealBtn2.removeEventListener('click', onDeal);
+		hitBtn2.removeEventListener('click', onHit);
+		standBtn2.removeEventListener('click', onStand);
+		doubleBtn2.removeEventListener('click', onDouble);
+		stakeInput2.removeEventListener('change', onStakeChange);
+		try{container.removeChild(root);}catch(_){}
 	};
 }
 
