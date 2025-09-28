@@ -214,6 +214,13 @@ function syncUpgradesToStats() {
 	playerHP = Math.min(playerHP, playerMaxHP);
 	const cap = Math.max(1, Math.round(upgrades.ammoCapacity));
 	if (cap > weapon.maxAmmo) weapon.maxAmmo = cap;
+	
+	// Update health bar display
+	const healthFill = document.getElementById('health-fill');
+	if (healthFill) {
+		const healthPercent = (playerHP / playerMaxHP) * 100;
+		healthFill.style.width = `${healthPercent}%`;
+	}
 }
 
 // Perk definitions
@@ -222,7 +229,10 @@ const allPerks = [
 	{ id: 'perk-fire', name: 'Fire Rate +10%', apply: () => { upgrades.fireRate = round2(upgrades.fireRate + 0.1); } },
 	{ id: 'perk-hp', name: 'Max HP +1 (heal to full)', apply: () => { upgrades.maxHP = Math.round(upgrades.maxHP + 1); playerHP = Math.round(upgrades.maxHP); } },
 	{ id: 'perk-ammo', name: 'Ammo Capacity +2', apply: () => { upgrades.ammoCapacity = Math.round(upgrades.ammoCapacity + 2); } },
-	{ id: 'perk-speed', name: 'Speed +10%', apply: () => { upgrades.speed = round2(upgrades.speed + 0.1); } }
+	{ id: 'perk-speed', name: 'Speed +10%', apply: () => { upgrades.speed = round2(upgrades.speed + 0.1); } },
+	{ id: 'perk-regen', name: 'Health Regen +0.5', apply: () => { upgrades.healthRegen = (upgrades.healthRegen || 0) + 0.5; } },
+	{ id: 'perk-luck', name: 'Casino Luck +5%', apply: () => { upgrades.casinoLuck = (upgrades.casinoLuck || 0) + 0.05; } },
+	{ id: 'perk-armor', name: 'Damage Reduction +10%', apply: () => { upgrades.damageReduction = (upgrades.damageReduction || 0) + 0.1; } }
 ];
 
 const keys = new Set();
@@ -337,7 +347,10 @@ function update(dt) {
 		}
 		// contact damage simple
 		if (Math.hypot(e.x - player1.x, e.y - player1.y) < e.radius + 0.2) {
-			playerHP = Math.max(0, playerHP - dt * 0.5);
+			const baseDamage = dt * 0.5;
+			const damageReduction = upgrades.damageReduction || 0;
+			const actualDamage = baseDamage * (1 - damageReduction);
+			playerHP = Math.max(0, playerHP - actualDamage);
 			damageFlash = Math.max(damageFlash, 0.35);
 		}
 		// remove dead and drop chips + score
@@ -357,6 +370,11 @@ function update(dt) {
         if (damageFlash > 0) damageFlash = Math.max(0, damageFlash - dt * 1.8);
         if (roundCompleteMessage > 0) roundCompleteMessage -= dt;
         if (casinoGameResultTimer > 0) casinoGameResultTimer -= dt;
+        
+        // Health regeneration
+        if (upgrades.healthRegen && playerHP < playerMaxHP) {
+            playerHP = Math.min(playerMaxHP, playerHP + upgrades.healthRegen * dt);
+        }
         
         // Check wave completion
         checkWaveComplete();
@@ -919,7 +937,31 @@ function loop(t) {
     	const reloadCostHtml = (playerChips >= reloadCost)
 		? String(reloadCost)
 		: `<span style="color:#ff6666" title="Not enough chips">${reloadCost}</span>`;
-    	stats.innerHTML = `Wave:${currentWave} HP:${Math.ceil(playerHP)} Ammo:${weapon.ammo}/${weapon.maxAmmo} Reload:${reloadCostHtml} Chips:${playerChips} | Enemies:${enemies.length}/${enemiesToKill} Killed:${enemiesKilled} Score:${playerScore}`;
+    	
+    	// Build perk display
+    	const perkCounts = {};
+    	const perkNames = {
+    		'perk-dmg': 'DMG',
+    		'perk-fire': 'FIRE', 
+    		'perk-hp': 'HP',
+    		'perk-ammo': 'AMMO',
+    		'perk-speed': 'SPD',
+    		'perk-regen': 'REGEN',
+    		'perk-luck': 'LUCK',
+    		'perk-armor': 'ARMOR'
+    	};
+    	
+    	// Count perk levels (this is a simplified display - in a real game you'd track individual perk instances)
+    	const perkDisplay = Object.keys(perkNames).map(id => {
+    		const baseValue = id === 'perk-dmg' ? 1.0 : id === 'perk-fire' ? 1.0 : id === 'perk-hp' ? 5 : id === 'perk-ammo' ? 8 : 0;
+    		const currentValue = upgrades[id.replace('perk-', '')] || 0;
+    		const increment = id === 'perk-dmg' ? 0.2 : id === 'perk-fire' ? 0.1 : id === 'perk-hp' ? 1 : id === 'perk-ammo' ? 2 : id === 'perk-speed' ? 0.1 : id === 'perk-regen' ? 0.5 : id === 'perk-luck' ? 0.05 : id === 'perk-armor' ? 0.1 : 0.1;
+    		const levels = Math.round((currentValue - baseValue) / increment);
+    		return levels > 0 ? `${perkNames[id]}+${levels}` : '';
+    	}).filter(Boolean).join(' ');
+    	
+    	const perkText = perkDisplay ? ` | Perks: ${perkDisplay}` : '';
+    	stats.innerHTML = `Wave:${currentWave} HP:${Math.ceil(playerHP)} Ammo:${weapon.ammo}/${weapon.maxAmmo} Reload:${reloadCostHtml} Chips:${playerChips}${perkText} | Enemies:${enemies.length}/${enemiesToKill} Killed:${enemiesKilled} Score:${playerScore}`;
     }
     const scoreEl = document.getElementById('score');
     if (scoreEl) scoreEl.textContent = `SCORE ${String(playerScore).padStart(6,'0')}`;
@@ -934,6 +976,9 @@ requestAnimationFrame(loop);
 // Load gun sprite when game starts
 loadGunSprite();
 loadEnemySprite();
+
+// Initialize perk system
+syncUpgradesToStats();
 
 // Start first wave
 spawnEnemies();
@@ -1159,7 +1204,8 @@ function playPoker() {
 		return;
 	}
 	playerChips -= 2;
-	const win = Math.random() < 0.4; // 40% win rate
+	const luckBonus = upgrades.casinoLuck || 0;
+	const win = Math.random() < (0.4 + luckBonus); // 40% base + luck bonus
 	if (win) {
 		playerChips += 5;
 		casinoGameResult = { type: 'win', message: 'You won! +5 chips', chips: 5 };
@@ -1176,7 +1222,8 @@ function playRoulette() {
 		return;
 	}
 	playerChips -= 1;
-	const win = Math.random() < 0.35; // 35% win rate
+	const luckBonus = upgrades.casinoLuck || 0;
+	const win = Math.random() < (0.35 + luckBonus); // 35% base + luck bonus
 	if (win) {
 		playerChips += 3;
 		casinoGameResult = { type: 'win', message: 'You won! +3 chips', chips: 3 };
@@ -1193,7 +1240,8 @@ function playSlots() {
 		return;
 	}
 	playerChips -= 1;
-	const win = Math.random() < 0.25; // 25% win rate
+	const luckBonus = upgrades.casinoLuck || 0;
+	const win = Math.random() < (0.25 + luckBonus); // 25% base + luck bonus
 	if (win) {
 		playerChips += 4;
 		casinoGameResult = { type: 'win', message: 'JACKPOT! +4 chips', chips: 4 };
@@ -1210,7 +1258,8 @@ function playCraps() {
 		return;
 	}
 	playerChips -= 3;
-	const win = Math.random() < 0.45; // 45% win rate
+	const luckBonus = upgrades.casinoLuck || 0;
+	const win = Math.random() < (0.45 + luckBonus); // 45% base + luck bonus
 	if (win) {
 		playerChips += 6;
 		casinoGameResult = { type: 'win', message: 'Snake eyes! +6 chips', chips: 6 };
